@@ -1,0 +1,152 @@
+#include <msp430.h>
+#define TIMERCOUNT 1284
+#define DEADTIME 0.2*TA2CCR0
+#define UPPERLIMIT   0.9*TIMERCOUNT
+#define LOWERLIMIT   0.2*TIMERCOUNT
+#define DOWNLIMIT      0.2*TIMERCOUNT
+#define UPLIMIT      0.8*TIMERCOUNT
+float temp1;
+float temp2;
+float a;
+int i;
+float Vin = 0;
+float Vout = 0;
+float V2 = 0;
+int count=0;
+float t;
+void SetVcoreUp (unsigned int level)
+ {
+    // Subroutine to change core voltage
+       // Open PMM registers for write
+       PMMCTL0_H = PMMPW_H;
+       // Set SVS/SVM high side new level
+       SVSMHCTL = SVSHE + SVSHRVL0 * level + SVMHE + SVSMHRRL0 * level;
+       // Set SVM low side to new level
+       SVSMLCTL = SVSLE + SVMLE + SVSMLRRL0 * level;
+       // Wait till SVM is settled
+       while ((PMMIFG & SVSMLDLYIFG) == 0);
+       // Clear already set flags
+       PMMIFG &= ~(SVMLVLRIFG + SVMLIFG);
+       // Set VCore to new level
+       PMMCTL0_L = PMMCOREV0 * level;
+       // Wait till new level reached
+       if ((PMMIFG & SVMLIFG))
+         while ((PMMIFG & SVMLVLRIFG) == 0);
+       // Set SVS/SVM low side to new level
+       SVSMLCTL = SVSLE + SVSLRVL0 * level + SVMLE + SVSMLRRL0 * level;
+       // Lock PMM registers for write access
+       PMMCTL0_H = 0x00;
+}
+void readADC()
+{
+    ADC12CTL0 |= ADC12SC;                   // Start conversion
+    __delay_cycles(10000);
+
+    Vin = ADC12MEM0*(0.00081);   //For resistors A and B.
+    Vout = (ADC12MEM1*(0.00081)/0.0215);   //For resistors A and B.
+
+
+    if(Vin > 14.7)                         //buck mode
+    {
+        t = TIMERCOUNT * 14/Vin;
+
+    }
+    if(Vin < 14 && Vin > 0.7)          //for boost mode
+    {
+        t = TIMERCOUNT - (TIMERCOUNT * Vin)/14;
+
+    }
+    TA2CCR1 = t;
+}
+
+void main(void)
+                                                                                                                                                                                                    {
+    WDTCTL = WDTPW | WDTHOLD;  //watchdog timer
+    P2DIR |= BIT5 + BIT4;       //set output direction
+    P2SEL |= BIT5 + BIT4;
+    P6SEL |= BIT0 + BIT1;
+
+    TA2CCR0 = TIMERCOUNT;                 //time period
+    TA2CCTL1 = OUTMOD_6;            //set output mode
+    TA2CCTL2 = OUTMOD_2;
+    TA2CTL = TASSEL_2 + MC_3;    //clk setup in up down mode.
+
+
+
+
+    REFCTL0 &= ~REFMSTR;                      // Reset REFMSTR to hand over control to
+                                                          // ADC12_A ref control registers
+    ADC12CTL0 = ADC12ON+ADC12MSC+ADC12SHT0_0;                                         // Turn on ADC12, set sampling time
+    ADC12CTL1 = ADC12SHP+ADC12CONSEQ_1 + ADC12SSEL_0;                                        // Use sampling timer, single sequence
+    ADC12CTL2 = ADC12RES_2;
+    ADC12MCTL0 = ADC12INCH_0;                 // ref+=AVcc, channel = A0
+    ADC12MCTL1 = ADC12INCH_1 + ADC12EOS;      // ref+=AVcc, channel = A1
+    ADC12IE = 0x08;                           // Enable ADC12IFG.3
+    ADC12CTL0 |= ADC12ENC;                    // Enable conversions
+
+    for (i = 0 ; i < 50; i++);                  // Delay for reference start-up
+
+    SetVcoreUp (0x01);
+    SetVcoreUp (0x02);
+    SetVcoreUp (0x03);
+
+    UCSCTL0 = DCO4 + DCO3 + DCO2 + 0x00FF;   // Set lowest possible DCOx DCO4 + DCO3 + DCO2 + DCO1 + DCO0 +, MODx
+    UCSCTL1 = DCORSEL_7 ;                    // Select DCO range 60MHz-135MHz operation
+    UCSCTL2 = FLLD_0 + 4119;
+
+    readADC();
+    readADC();
+    //while(!(ADC12IFG));
+
+    __bis_SR_register( GIE);       // Enter LPM0, enable interrupts
+    __no_operation();                         // For debugger
+
+    while(1) {
+
+        while(Vout <= 13.8 || Vout >= 15.3)
+        {
+                if(Vout < 14) {
+
+                    if(TA2CCR1 >= UPPERLIMIT) {
+                        TA2CCR1 = UPLIMIT;
+                        TA2CCR2 = TA2CCR1 - DEADTIME;
+                    }
+
+                    else if(TA2CCR1 <= UPPERLIMIT) {
+                    TA2CCR1 = TA2CCR1 + 0.02*TA2CCR1;
+                    TA2CCR2 = TA2CCR1 - DEADTIME;
+                    __delay_cycles(1000000);
+
+                    temp1 = TA2CCR1;
+                    temp2 = TA2CCR2;
+
+                    }
+                }
+                if(Vout > 14) {
+                    temp1 = TA2CCR1;
+                    if(TA2CCR1 <= LOWERLIMIT) {
+
+                        TA2CCR1 = DOWNLIMIT;
+                        TA2CCR2 = TA2CCR1 - DEADTIME;
+                        temp1 = TA2CCR1;
+                    }
+                    else if(TA2CCR1 >= LOWERLIMIT) {
+                        TA2CCR1 = TA2CCR1 -  0.02*TA2CCR1;
+                        TA2CCR2 = TA2CCR1 - DEADTIME;
+                        __delay_cycles(1000000);
+                    }
+                    temp1 = TA2CCR1;
+                    temp2 = TA2CCR2;
+
+                }
+
+        }
+
+                for(i = 0; i < 100000; i++);
+
+                readADC();
+                readADC();
+
+    }
+}
+
