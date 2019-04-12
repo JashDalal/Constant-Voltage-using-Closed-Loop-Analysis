@@ -1,0 +1,157 @@
+#include <msp430g2553.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#define UPPERLIMIT 0.9
+#define LOWERLIMIT 0.1
+//state of buck is changed to ON and Boost  to OFF
+#define CCR0val 310
+#define Vout 12
+#define x 0.014
+#define COUNT 500
+#define RANGE 1
+#define ADC_CHANNELS 2
+int flag;
+unsigned int samples[2];
+float Vin, Vo;
+float adc1, adc2;
+int count = COUNT;
+
+//Vout is the constant voltage to be given to the battery.
+//Vo is the output of the converter
+//Vin is input from solar panel
+//Vin is for Pin 1.0
+//Vo is for Pin 1.3
+//For Buck Mode, PWM on Pin 2.2 and Pin 2.4 on
+//For Boost mode, PWM on Pin 2.4 and 2.2 is off.
+//PWM is on Pin 2.2 and Pin 2.4
+//Factor for ADC is 2.5/1023 = 0.002443
+//Factor for voltage divider is 98 (Ratio is 1:100)
+void readADC(){
+    __delay_cycles(1000);
+    ADC10CTL0 &= ~ENC;
+    while(!ADC10IFG & BUSY);
+    ADC10SA = (unsigned int)samples;
+
+    ADC10CTL0 |= ENC + ADC10SC;
+    Vin = (float)(samples[1]) * 0.00244 * 96;
+    __delay_cycles(200);
+    Vo = (float)(samples[0]) * 0.00244 * 96;
+}
+void ADC_Config(void){
+    ADC10CTL0 = SREF_1 + ADC10SHT_3 + MSC + ADC10ON + ADC10IE + REF2_5V + REFON;
+    __delay_cycles(1000);
+    ADC10CTL1 = INCH_1 + ADC10DIV_0 + CONSEQ_1 + SHS_0 + ADC10SSEL_3;      //Multi-channel repeated conversion starting from channel 2
+    ADC10AE0 = BIT1 + BIT0;
+    ADC10DTC1 = ADC_CHANNELS;
+}
+
+
+
+float getduty(float adc){
+    float d;
+
+    if(adc < Vout){
+
+        d = 1 - (adc/Vout);
+        d = 1 - d;
+    }
+    else{
+        d = Vout/adc;
+        d = 1 - d;
+    }
+    return d;
+}
+
+
+
+void main(void)
+{
+  WDTCTL = WDTPW + WDTHOLD; // Stop WDT
+  P3SEL = 0x00;
+  P3REN = 0X06;
+  P3OUT = 0x02;
+  P3DIR |= 0x02;
+  P3DIR |= 0x01;
+
+  DCOCTL = 0;
+  BCSCTL1 = CALBC1_16MHZ;
+  DCOCTL = CALDCO_16MHZ;
+
+  P2DIR |= BIT2+BIT4;                       // P2.2 and P2.4 output
+  P2SEL |= BIT2+BIT4;                       // P2.4 and P2.2 options select
+
+  ADC_Config();
+  readADC();
+  TA1CCR0 = CCR0val;                        // PWM Period
+  TA1CCTL1 = OUTMOD_7;                      // CCR1 reset/set
+  TA1CCTL2 = OUTMOD_7;                      // CCR2 reset/set
+  TA1CTL = TASSEL_2 + MC_1;                 // SMCLK, up mode, clear TAR
+
+  float duty = 0;
+  duty = getduty(Vin);
+  //BUCK
+  if(Vin > Vout)
+      TA1CCR1 =  duty * CCR0val;       // CCR1 PWM duty cycle
+  //BOOST
+  if(Vin < Vout)
+      TA1CCR2 =  duty * CCR0val;       // CCR2 PWM duty cycle
+
+  for(;;)
+  {
+           readADC();
+           duty = getduty(Vin);
+           /*Since we are using inverted duty, we have
+            * to reverse the direction of increase and
+            * decrease in the dutycycle.
+            * Check document Explanation Found on gmail
+            */
+
+           //BOOST mode
+           if(Vin < Vout){
+               while(count != 0) {
+                       if(Vo > Vout){
+                           duty = duty + x;
+                       }
+                       if(Vo < Vout){
+                           duty = duty - x;
+                       }
+                       if(duty > UPPERLIMIT)
+                         duty = UPPERLIMIT;
+                       if(duty < LOWERLIMIT)
+                         duty = LOWERLIMIT;
+                       TA1CCR1 = 0;
+                       TA1CCR2 =  (int)(duty * CCR0val);
+                       readADC();
+                       count--;
+                   }
+
+           }
+
+           //BUCK MODE
+            if(Vin > Vout){
+                while(count != 0) {
+                    if(Vo > Vout) {
+                       duty = duty + x;
+                   }
+                   if(Vo < Vout) {
+                        duty = duty - x;
+                   }
+                   if(duty > UPPERLIMIT)
+                           duty = UPPERLIMIT;
+                   if(duty < LOWERLIMIT)
+                   TA1CCR1 =  (int)(duty * CCR0val); // CCR1 PWM duty cycle
+                   TA1CCR2 = CCR0val;
+                   readADC();
+                   count--;
+                }
+            }
+            count = COUNT;
+
+     }
+}
+#pragma vector = ADC10_VECTOR
+ __interrupt void ADC10_ISR(void)
+ {
+     __bis_SR_register(CPUOFF + GIE);            //exits the interrupts
+ }
