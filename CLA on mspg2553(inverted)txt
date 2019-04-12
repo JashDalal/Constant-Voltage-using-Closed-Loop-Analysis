@@ -1,0 +1,185 @@
+NOTE:As per the requirement of energy subsystem,  the earlier CLA code is              modified. It is inverted.
+
+#include <msp430g2553.h>
+#include <stdio.h>
+#define UPPERLIMIT 0.7
+#define LOWERLIMIT 0.3
+// changed upperlimit and lowerlimit from 90 and 10 to 70 and 30
+//constant output changed from 36 to 12
+//state of buck is changed to ON and Boost  to OFF
+#define CCR0val 512
+#define Vout 12
+#define x 0.01
+#define COUNT 5
+#define RANGE 0.2
+int flag;
+int sensor[2];
+float Vin, Vo;
+int count = COUNT;
+//Vout is the constant voltage to be given to the battery.
+//Vo is the output of the converter
+//Vin is input from solar panel
+//Vin is for Pin 1.1
+//Vo is for Pin 1.0
+//For Buck Mode, PWM on Pin 2.2 and Pin 2.4 off
+//For Boost mode, PWM on Pin 2.4 and 2.2 is on.
+//PWM is on Pin 2.2 and Pin 2.4
+//Factor for ADC is 2.5/1023
+//Factor for ADC is 13.75
+void readADC() {
+    flag = 0;
+    if (flag == 0 )
+         {
+          sensor[0] = 0;
+          ADC10CTL0 = SREF_1 + ADC10SHT_2 + REFON + REF2_5V + ADC10ON + ADC10IE;
+          ADC10CTL1 = INCH_0;
+          ADC10CTL0 |= ENC + ADC10SC;
+          sensor[0] = ADC10MEM;
+          Vin = ((float)sensor[0]/409.2) * 21.5;
+          //Vin = ((float)sensor[0]/409.2);
+          ADC10CTL0 &= ~ENC;
+          flag = 1;
+        }
+
+        if (flag == 1)
+        {
+            sensor[1] = 0;
+            ADC10CTL0 = SREF_1 + ADC10SHT_2 + REFON + REF2_5V + ADC10ON + ADC10IE;
+            ADC10CTL1 = INCH_1;
+
+            ADC10CTL0 |= ENC + ADC10SC;
+            sensor[1] = ADC10MEM;
+            Vo = ((float)sensor[1]/409.2) * 46.5;
+            ADC10CTL0 &= ~ENC;
+            flag = 0;
+
+          }
+}
+void initialisepins(){
+    count = COUNT;
+
+    //BUCK MODE
+    if(Vin > Vout){
+           //Pin 2.4 is made off
+           P2SEL &= (~BIT4);
+           P2OUT |= BIT4;
+     }
+
+    //BOOST MODE
+     if(Vin < Vout){
+           //Pin2.2 is made on.
+           P2SEL &= (~BIT2);
+           P2OUT ^= BIT2;
+     }
+
+}
+float getduty(float adc){
+    float d;
+
+    if(adc < Vout){
+
+        d = 1 - (adc/Vout);
+        d=1-d;
+    }
+    else{
+        d = Vout/adc;
+        d=1-d;
+    }
+    return d;
+}
+
+
+
+void main(void)
+{
+  WDTCTL = WDTPW + WDTHOLD; // Stop WDT
+  P3SEL = 0x00;
+  P3REN = 0X06;
+  P3OUT = 0x02;
+  P3DIR |= 0x02;
+  P3DIR |= 0x01;
+
+  DCOCTL = 0;
+  BCSCTL1 = CALBC1_16MHZ;
+  DCOCTL = CALDCO_16MHZ;
+
+  P2DIR |= BIT2+BIT4;                       // P2.2 and P2.4 output
+  P2SEL |= BIT2+BIT4;                       // P2.4 and P2.2 options select
+
+  /*DCOCTL = CALDCO_16MHZ;
+  BCSCTL1 = CALBC1_16MHZ;
+  UCSCTL0 = DCO4 + DCO3 + DCO2 + 0x00FF;   // Set lowest possible DCOx DCO4 + DCO3 + DCO2 + DCO1 + DCO0 +, MODx
+    UCSCTL1 = DCORSEL_7 ;                    // Select DCO range 60MHz-135MHz operation
+    UCSCTL2 = FLLD_0 + 4119;*/
+
+  readADC();
+  TA1CCR0 = CCR0val;                        // PWM Period
+  TA1CCTL1 = OUTMOD_7;                      // CCR1 reset/set
+  TA1CCTL2 = OUTMOD_7;                      // CCR2 reset/set
+  TA1CTL = TASSEL_2 + MC_1;                 // SMCLK, up mode, clear TAR
+  initialisepins();
+  float duty = 0;
+  //BUCK
+  if(Vin > Vout)
+      TA1CCR1 =  getduty(Vin) * CCR0val;       // CCR1 PWM duty cycle
+  //BOOST
+  if(Vin < Vout)
+      TA1CCR2 =  getduty(Vin) * CCR0val;       // CCR2 PWM duty cycle
+  duty = getduty(Vin);
+  for(;;)
+  {
+           readADC();
+           duty = getduty(Vin);
+           initialisepins();
+
+           //IN BETWEEN RANGE
+           if((Vo >=(Vout - RANGE)) &&  (Vo <=(Vout + RANGE))){
+               if(Vin < Vout)
+                   TA1CCR1 |=  (int)(getduty(Vin) * CCR0val);
+               if(Vin > Vout)
+                   TA1CCR2 |=  (int)(getduty(Vin) * CCR0val);
+           }
+
+           //Protection for Converter Duty
+           //for boost mode
+           if((Vin < Vout) && (Vin <= (LOWERLIMIT * Vout) || Vin >= (UPPERLIMIT * Vout)))
+               TA1CCR1 |=  (int)(getduty(Vin) * CCR0val);
+
+           //for buck mode
+           if((Vin > Vout) && (Vin <= (Vout/UPPERLIMIT)))
+               TA1CCR2 |=  (int)(getduty(Vin) * CCR0val);
+
+
+           //BOOST mode
+           if((Vin < (Vout * UPPERLIMIT)) && (Vin > (Vout * LOWERLIMIT))){
+               while(count != 0 && (Vo >= (Vout + RANGE) || Vo <= (Vout - RANGE))) {
+                   if(Vo > Vout){
+                           duty = duty + x;
+                   }
+
+                   if(Vo < Vout){
+                           duty = duty - x;
+                   }
+                   readADC();
+                   TA1CCR1 |=  (int)(duty * CCR0val);
+                   count--;
+               }
+           }
+
+           //BUCK MODE
+            if(Vin > Vout/UPPERLIMIT){
+                while(count != 0 && (Vo >= (Vout + RANGE) || Vo <= (Vout - RANGE))) {
+                    if(Vo > Vout) {
+                       duty = duty + x;
+                   }
+                   if(Vo < Vout) {
+                       duty = duty - x;
+                   }
+                   readADC();
+                   TA1CCR2 |=  (int)(duty * CCR0val);       // CCR1 PWM duty cycle
+                   count--;
+                }
+            }
+
+      }
+  }
